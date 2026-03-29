@@ -1,0 +1,6 @@
+.venv
+__pycache__
+*.pyc
+demo-output
+node_modules
+dist
