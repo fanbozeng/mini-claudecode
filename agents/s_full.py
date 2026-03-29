@@ -1,130 +1,491 @@
 #!/usr/bin/env python3
 # Harness: all mechanisms combined -- the complete cockpit for the model.
+
 """
-s_full.py - Full Reference Agent
+████████████████████████████████████████████████████████████████████████████
 
-Capstone implementation combining every mechanism from s01-s11.
-Session s12 (task-aware worktree isolation) is taught separately.
-NOT a teaching session -- this is the "put it all together" reference.
+⚡ 【快速导航】如果你只想看某一部分：
+==================================
 
-    +------------------------------------------------------------------+
-    |                        FULL AGENT                                 |
-    |                                                                   |
-    |  System prompt (s05 skills, task-first + optional todo nag)      |
-    |                                                                   |
-    |  Before each LLM call:                                            |
-    |  +--------------------+  +------------------+  +--------------+  |
-    |  | Microcompact (s06) |  | Drain bg (s08)   |  | Check inbox  |  |
-    |  | Auto-compact (s06) |  | notifications    |  | (s09)        |  |
-    |  +--------------------+  +------------------+  +--------------+  |
-    |                                                                   |
-    |  Tool dispatch (s02 pattern):                                     |
-    |  +--------+----------+----------+---------+-----------+          |
-    |  | bash   | read     | write    | edit    | TodoWrite |          |
-    |  | task   | load_sk  | compress | bg_run  | bg_check  |          |
-    |  | t_crt  | t_get    | t_upd    | t_list  | spawn_tm  |          |
-    |  | list_tm| send_msg | rd_inbox | bcast   | shutdown  |          |
-    |  | plan   | idle     | claim    |         |           |          |
-    |  +--------+----------+----------+---------+-----------+          |
-    |                                                                   |
-    |  Subagent (s04):  spawn -> work -> return summary                 |
-    |  Teammate (s09):  spawn -> work -> idle -> auto-claim (s11)      |
-    |  Shutdown (s10):  request_id handshake                            |
-    |  Plan gate (s10): submit -> approve/reject                        |
-    +------------------------------------------------------------------+
+🔹 只想理解基本概念？  
+   → 读【一句话概括】到【类比：秘书事务所】部分（5分钟）
 
-    REPL commands: /compact /tasks /team /inbox
+🔹 想了解整个系统架构？  
+   → 读【整个系统的12个"齿轮"】部分（10分钟）
+
+🔹 想看最关键函数？  
+   → 跳到 agent_loop 部分（最重要的【心脏】）
+
+🔹 想看所有工具定义？  
+   → 搜索 TOOL_HANDLERS 字典
+
+🔹 想快速检查一个概念？  
+   → 使用 Ctrl+F 搜索："★★★" 或你感兴趣的关键词
+
+████████████████████████████████████████████████████████████████████████████
+
+【关键数字参考】
+================
+
+TOKEN_THRESHOLD = 100000   ← AI 脑子的容量（当超过时压缩）
+POLL_INTERVAL = 5          ← 秘书多久检查一次新消息
+IDLE_TIMEOUT = 60          ← 秘书多久没任务进入休眠
+TOOLS 列表共 31 个工具     ← AI 可以用的"手"
+齿轮共 12 个              ← 整个系统的模块数
+函数和类共 50+ 个         ← 系统复杂度有多高
+
+████████████████████████████████████████████████████████████████████████████
+
+★★★ 🎯 博士生&小学生智力讲解：完整AI系统 🎯 ★★★
+
+亲爱的各位诸位：
+
+虽然你们可能发表过论文、读过专业论文...但今天我们要当一个"智力小学生"，
+从**最最最基础**的角度理解这个复杂的AI系统。
+
+████████████████████████████████████████████████████████████████████████████
+
+【一句话概括这个程序】
+===================
+
+这是一个"超级AI秘书"的办公室管理系统。
+
+想象你是一个富豪，雇了一个AI秘书。这个秘书能做很多事情：
+  ✓ 执行命令（bash）
+  ✓ 管理待办事项（todos）
+  ✓ 雇别的秘书一起工作（subagent）
+  ✓ 学习新技能（skills）
+  ✓ 在后台工作而不让你等（background tasks）
+  ✓ 和其他秘书聊天（messaging）
+  ✓ 团队协作（team）
+  ✓ 需要时找你批准计划（plan approval）
+
+✨ 核心理念：让 AI 能像真人秘书一样聪明、高效、能协作。
+
+████████████████████████████████████████████████████████████████████████████
+
+【整个系统的12个"齿轮"】==  从简单到复杂  ==
+===================================================
+
+齿轮1️⃣：base_tools（基础工具）
+  ├─ 工具就像"秘书的手"
+  ├─ safe_path()   → 检查路径在工作目录内（防止秘书跑到别人家）
+  ├─ run_bash()    → 运行命令  
+  ├─ run_read()    → 读文件
+  ├─ run_write()   → 写文件
+  └─ run_edit()    → 编辑文件
+
+齿轮2️⃣：TodoManager（待办清单）[s03]
+  ├─ 秘书需要记住所有任务
+  ├─ 可以创建、获取、更新、删除任务
+  ├─ 格式：{"id": "任务ID", "title": "做什么", "status": "进行中/完成"}
+  └─ 自动保存到 .tasks/ 文件夹
+
+齿轮3️⃣：SubagentManager（雇用小秘书）[s04]
+  ├─ 主秘书可以临时雇佣其他秘书来帮忙
+  ├─ 分配任务 → 小秘书工作 → 汇报结果
+  ├─ 比如："帮我分析这个项目，然后告诉我结论"
+  └─ 小秘书完成后立即汇报，不用等
+
+齿轮4️⃣：SkillLoader（学习技能）[s05]
+  ├─ 秘书可以读取"技能书"（skills/目录下的.md文件）
+  ├─ 学到新技能后，执行任务时更聪明
+  ├─ 例如：学会"PDF处理技能"后，可以处理PDF文件
+  └─ 通过系统提示注入到 AI 的脑子里
+
+齿轮5️⃣：Compression（消息压缩）[s06]
+  ├─ AI 的脑容量是有限的（token数量限制）
+  ├─ 当对话太长时，需要"压缩"旧消息
+  ├─ microcompact()    → 看看消息有多"重"
+  ├─ auto_compact()    → 当太"重"时自动压缩
+  └─ 原理：把旧的聊天内容总结成一句话
+
+齿轮6️⃣：TaskManager（文件任务）[s07]
+  ├─ 秘书需要在磁盘上保存任务信息
+  ├─ 这样关机重启后，任务不会丢失
+  ├─ 支持创建、查询、更新、完成任务
+  └─ 任务互不干扰，相互独立
+
+齿轮7️⃣：BackgroundManager（后台执行）[s08]
+  ├─ 有些任务很耗时（比如运行10分钟的程序）
+  ├─ 不能让主秘书傻傻等着
+  ├─ 创建后台线程，主秘书继续处理其他东西
+  ├─ 后台线程完成后，把结果放进"信箱"
+  └─ 主秘书适时检查信箱，发现有新结果
+
+齿轮8️⃣：MessageBus（消息系统）[s09]
+  ├─ 多个秘书需要互相通信
+  ├─ 秘书A想告诉秘书B某个信息
+  ├─ 用"消息总线"传递，而不是直接说话
+  ├─ 好处：秘书之间解耦，互不干扰
+  └─ 消息存储在 .team/inbox/
+
+齿轮9️⃣：TeammateManager（团队协作）[s09/s11]
+  ├─ 管理所有雇佣的秘书（teammates）
+  ├─ 每个秘书有自己的线程，在 .team/agents/teammate_X.json 里记录状态
+  ├─ 秘书可以工作 → 空闲 → 接收任务 → 工作...
+  ├─ 自动认领任务（s11 autonomous agent）
+  └─ 主秘书可以给他们分配工作
+
+齿轮🔟：ShutdownProtocol + PlanApproval [s10]
+  ├─ 秘书需要"优雅关机"
+  ├─ shutdown_request handshake: 秘书说"我要关闭"→你说"好"→秘书关闭
+  ├─ 计划批准机制：秘书制定大计划 → 提交给你 → 你批准/拒绝
+  ├─ 防止秘书做错误的事情
+  └─ 计划存储在 .team/approvals/
+
+齿轮1️⃣1️⃣：agent_loop（大脑循环）[完全整合]
+  ├─ 这是整个系统的"心脏"
+  ├─ 不停循环：检查 → 思考 → 执行 → 检查...
+  ├─ 每次循环前，自动做5件事：
+  │   1. 压缩过长的消息  （齿轮5）
+  │   2. 检查后台任务完成没  （齿轮7）
+  │   3. 检查新消息  （齿轮8）
+  │   4. 检查任务更新  （齿轮6）
+  │   5. 问"要不要继续？"  （如果启用todo nagging）
+  ├─ 然后调用 AI（Claude）进行思考
+  └─ AI 使用各种工具，再循环...
+
+齿轮1️⃣2️⃣：WorktreeManager（工作树隔离）[s12]
+  ├─ 解决并行任务冲突问题
+  ├─ 每个任务分配独立目录（worktree）
+  ├─ Git worktree 技术实现目录隔离
+  ├─ 任务卡决定做什么，worktree决定在哪里做
+  ├─ 支持 worktree_create, worktree_run, worktree_status 等工具
+  └─ 事件日志记录所有操作（.worktrees/events.jsonl）
+
+████████████████████████████████████████████████████████████████████████████
+
+【这个系统如何连接】
+====================
+
+                     ┌─────────────────┐
+                     │   User Input    │
+                     │   (你的命令)     │
+                     └────────┬────────┘
+                              │
+                              ▼
+                     ┌─────────────────┐
+                     │  agent_loop()   │ ◄─── 主循环（齿轮11）
+                     │  (大脑循环)      │
+                     └────────┬────────┘
+                              │
+        ┌─────────────────────┼─────────────────────┐
+        │                     │                     │
+        ▼                     ▼                     ▼
+    ┌───────┐          ┌───────────┐        ┌──────────┐
+    │Compress│          │ CheckBG   │        │CheckInbox│
+    │(齿轮5)  │          │ (齿轮7)   │        │(齿轮8)   │
+    └───────┘          └───────────┘        └──────────┘
+        │                     │                     │
+        └─────────────────────┼─────────────────────┘
+                              │
+                              ▼
+                    ┌──────────────────┐
+                    │   AI thinks      │ ◄─── Claude 的大脑
+                    │  (使用工具)      │
+                    └────────┬─────────┘
+                             │
+        ┌────────┬───────────┼───────────┬──────────┐
+        │        │           │           │          │
+        ▼        ▼           ▼           ▼          ▼
+    ┌─────┐ ┌────────┐  ┌──────────┐┌──────┐ ┌──────────┐
+    │bash │ │read    │ │write     ││edit  │ │TodoWrite │
+    └─────┘ └────────┘  └──────────┘└──────┘ └──────────┘
+        │        │           │           │          │
+        └────────┴───────────┴───────────┴──────────┘
+                              │
+                              ▼
+                        ┌──────────┐
+                        │ Results  │
+                        │ 放回AI    │
+                        └──────────┘
+                              │
+                              ▼
+               (AI 看到结果，继续思考或停止)
+
+████████████████████████████████████████████████████████████████████████████
+
+【类比：秘书事务所】
+===================
+
+想象一个秘书事务所:
+
+  您 (User)
+    │
+    ▼
+  主秘书 (Main Agent) ◄─────┐
+    │                        │
+    ├─ 有记忆本 (TodoManager)  │ 所有秘书都住在
+    ├─ 有技能书 (SkillLoader)  │ 同一个办公室
+    ├─ 有信息板 (MessageBus)   │ (.team/目录)
+    ├─ 管理任务 (TaskManager)  │
+    ├─ 管理后台 (BackgroundManager)
+    │                        │
+    ├─► 小秘书 #1 ─────────┐ │
+    ├─► 小秘书 #2 ─────────┤ 自动协作
+    └─► 小秘书 #3 ─────────┘ （s11）
+                        ▲
+                        │ 每个秘书都在
+                        │ 自己的线程里工作
+                        │ (不互相打扰)
+
+████████████████████████████████████████████████████████████████████████████
+
+【关键理解：这不是11个独立的程序】
+===================================
+
+这些不是11个独立的脚本，而是**11个功能层**，像意大利面条一样缠在一起：
+
+  ✓ s01 基础循环 ✓ s02 工具系统 ✓ s03 待办管理
+          ↓ (使用了)  ↓ (集成了)
+  ✓ s04 子代理 ✓ s05 技能系统 ✓ s06 消息压缩
+          ↓ (使用了)  ↓ (集成了)
+  ✓ s07 任务系统 ✓ s08 后台执行 ✓ s09 消息总线
+          ↓ (使用了)  ↓ (集成了)
+  ✓ s10 关闭协议+计划批准 ✓ s11 自动认领
+          ↓ (集成进)
+  ✓✓✓ s_full.py （730行的怪兽系统）✓✓✓
+
+████████████████████████████████████████████████████████████████████████████
+
+现在让我们一行行读代码...
 """
 
-import json
-import os
-import re
-import subprocess
-import threading
-import time
-import uuid
-from pathlib import Path
-from queue import Queue
+# ========================== 导入部分（都是Python的标准库和外部库）==========================
 
-from anthropic import Anthropic
-from dotenv import load_dotenv
+import json        # 处理 JSON 格式数据（配置、消息等）
+import os          # 操作系统接口（读环境变量、路径操作）
+import re          # 正则表达式（搜索、匹配文本）
+import subprocess  # 运行外部命令（比如shell命令）
+import threading   # 多线程（多个秘书同时工作）
+import time        # 时间操作（计时、延迟等）
+import uuid        # 生成唯一ID（给每个任务、消息、秘书一个独特身份）
+from pathlib import Path  # 路径操作（用对象而不是字符串）
+from queue import Queue   # 队列（秘书之间安全地传递消息）
+from typing import Optional  # 类型注解（可选类型）
 
-load_dotenv(override=True)
+from anthropic import Anthropic  # ★ AI 大脑的核心：Claude 模型
+from dotenv import load_dotenv   # 加载 .env 文件的环境变量
+
+# ========================== 初始化（设置秘书办公室的环境）==========================
+
+load_dotenv(override=True)  # 从 .env 文件中加载 API密钥 等配置
 if os.getenv("ANTHROPIC_BASE_URL"):
-    os.environ.pop("ANTHROPIC_AUTH_TOKEN", None)
+    os.environ.pop("ANTHROPIC_AUTH_TOKEN", None)  # 防止两个认证方式冲突
 
-WORKDIR = Path.cwd()
-client = Anthropic(base_url=os.getenv("ANTHROPIC_BASE_URL"))
-MODEL = os.environ["MODEL_ID"]
+# 秘书办公室的位置
+WORKDIR = Path.cwd()  # 工作目录（整个办公室）
+client = Anthropic(base_url=os.getenv("ANTHROPIC_BASE_URL"))  # 连接到 Claude AI
+MODEL = os.environ["MODEL_ID"]  # 使用哪个 Claude 模型（比如 claude-3-5-sonnet）
 
-TEAM_DIR = WORKDIR / ".team"
-INBOX_DIR = TEAM_DIR / "inbox"
-TASKS_DIR = WORKDIR / ".tasks"
-SKILLS_DIR = WORKDIR / "skills"
-TRANSCRIPT_DIR = WORKDIR / ".transcripts"
-TOKEN_THRESHOLD = 100000
-POLL_INTERVAL = 5
-IDLE_TIMEOUT = 60
+# 检测Git仓库根目录
+def detect_repo_root(cwd: Path) -> Optional[Path]:
+    """Return git repo root if cwd is inside a repo, else None."""
+    try:
+        r = subprocess.run(
+            ["git", "rev-parse", "--show-toplevel"],
+            cwd=cwd,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        if r.returncode != 0:
+            return None
+        root = Path(r.stdout.strip())
+        return root if root.exists() else None
+    except Exception:
+        return None
 
-VALID_MSG_TYPES = {"message", "broadcast", "shutdown_request",
-                   "shutdown_response", "plan_approval_response"}
+REPO_ROOT = detect_repo_root(WORKDIR) or WORKDIR  # 检测仓库根目录，如果失败则使用当前工作目录
 
+# ========================== 目录结构（秘书办公室的文件柜）==========================
+#
+# 办公室看起来长这样：
+# 
+# .team/                         ← 团队秘书的工作区
+#   ├── inbox/                   ← 消息收件箱
+#   ├── agents/                  ← 每个秘书的记录文件
+#   └── approvals/               ← 需要批准的计划
+# 
+# .tasks/                        ← 任务数据库（持久化存储）
+# skills/                        ← 秘书的技能库（.md文件）
+# .transcripts/                  ← 对话记录存档
+#
+
+TEAM_DIR = WORKDIR / ".team"           # 团队办公室目录
+INBOX_DIR = TEAM_DIR / "inbox"         # 消息盒子
+TASKS_DIR = WORKDIR / ".tasks"         # 任务存储
+SKILLS_DIR = WORKDIR / "skills"        # 技能库
+TRANSCRIPT_DIR = WORKDIR / ".transcripts"  # 对话记录
+
+# ========================== 全局参数（秘书办公室的规则）==========================
+
+TOKEN_THRESHOLD = 100000   # AI 的脑子能容纳 100000 个 token（当超过时压缩消息）
+POLL_INTERVAL = 5          # 每 5 秒检查一次新消息（秘书休息时间）
+IDLE_TIMEOUT = 60          # 秘书 60 秒没有任务就进入"休眠"状态
+
+# 允许的消息类型（秘书之间的谈话规范）
+VALID_MSG_TYPES = {"message",              # 普通消息
+                   "broadcast",             # 广播消息（发给所有人）
+                   "shutdown_request",      # 关闭请求
+                   "shutdown_response",     # 关闭响应
+                   "plan_approval_response"}  # 计划批准响应
+
+
+# ============== 齿轮1️⃣：基础工具 (base_tools) ========================
+# 这些是秘书的"手"，能做的基础动作
 
 # === SECTION: base_tools ===
+
 def safe_path(p: str) -> Path:
-    path = (WORKDIR / p).resolve()
-    if not path.is_relative_to(WORKDIR):
-        raise ValueError(f"Path escapes workspace: {p}")
+    """
+    ★ 安全路径检查 - 防止秘书"越狱"
+    
+    为什么需要？
+    想象有个恶意的人，让秘书删除系统文件："rm -rf /"
+    这个函数就像保安，检查："你要访问的路径，是否在我们的办公室里？"
+    
+    逻辑：
+    1. 把相对路径变成绝对路径（如：./data.txt → /Users/xxx/data.txt）
+    2. 检查这个路径是否在工作目录内
+    3. 如果在，返回；如果不在，抛出错误
+    """
+    path = (WORKDIR / p).resolve()  # 转换为绝对路径
+    if not path.is_relative_to(WORKDIR):  # 检查是否在工作目录内
+        raise ValueError(f"Path escapes workspace: {p}")  # 不在就报错
     return path
 
 def run_bash(command: str) -> str:
-    dangerous = ["rm -rf /", "sudo", "shutdown", "reboot", "> /dev/"]
-    if any(d in command for d in dangerous):
+    """
+    ★ 运行一个 bash 命令（同步/阻塞式）
+    
+    秘书说："老板，我要运行一个命令"
+    秘书停下来等命令完成，然后告诉你结果
+    
+    工作流程：
+    1. 检查命令是否包含危险指令
+    2. 如果安全，运行命令
+    3. 捕获输出（stdout 和 stderr）
+    4. 返回结果给 AI
+    """
+    dangerous = ["rm -rf /", "sudo", "shutdown", "reboot", "> /dev/"]  # 黑名单
+    if any(d in command for d in dangerous):  # 检查命令是否危险
         return "Error: Dangerous command blocked"
     try:
         r = subprocess.run(command, shell=True, cwd=WORKDIR,
-                           capture_output=True, text=True, timeout=120)
-        out = (r.stdout + r.stderr).strip()
-        return out[:50000] if out else "(no output)"
-    except subprocess.TimeoutExpired:
+                           capture_output=True, text=True, timeout=120)  # 最多等 120 秒
+        out = (r.stdout + r.stderr).strip()  # 合并输出和错误信息
+        return out[:50000] if out else "(no output)"  # 返回结果（截断到50000字符）
+    except subprocess.TimeoutExpired:  # 如果超时
         return "Error: Timeout (120s)"
 
 def run_read(path: str, limit: int = None) -> str:
+    """
+    ★ 读取文件内容
+    
+    秘书说："老板，我要读一个文件"
+    秘书打开文件，读出内容，告诉你
+    
+    参数：
+    - path: 文件路径
+    - limit: 可选，最多读几行（如果文件太大，可以只看前几行）
+    """
     try:
-        lines = safe_path(path).read_text().splitlines()
+        lines = safe_path(path).read_text().splitlines()  # 读文件，按行分割
         if limit and limit < len(lines):
-            lines = lines[:limit] + [f"... ({len(lines) - limit} more)"]
-        return "\n".join(lines)[:50000]
+            # 如果设置了行数限制且文件超过限制
+            lines = lines[:limit] + [f"... ({len(lines) - limit} more)"]  # 只保留前 limit 行
+        return "\n".join(lines)[:50000]  # 连接起来，截断到50000字符
     except Exception as e:
         return f"Error: {e}"
 
 def run_write(path: str, content: str) -> str:
+    """
+    ★ 写入文件
+    
+    秘书说："老板，我要写一些内容到文件"
+    秘书创建文件（如果不存在），写入内容
+    """
+    try:
+        fp = safe_path(path)  # 检查路径安全
+        fp.parent.mkdir(parents=True, exist_ok=True)  # 创建父目录（如果不存在）
+        fp.write_text(content)  # 写入内容
+        return f"Wrote {len(content)} bytes"
+    except Exception as e:
+        return f"Error: {e}"
+
+def run_edit(path: str, old_text: str, new_text: str) -> str:
+    """
+    ★ 编辑文件（查找并替换）
+    
+    秘书说："老板，我要把文件里的 A 改成 B"
+    秘书找到 A，替换成 B，保存文件
+    """
     try:
         fp = safe_path(path)
-        fp.parent.mkdir(parents=True, exist_ok=True)
-        fp.write_text(content)
+        c = fp.read_text()  # 读整个文件
+        if old_text not in c:  # 检查旧文本是否存在
+            return f"Error: Text not found in {path}"
+        fp.write_text(c.replace(old_text, new_text, 1))  # 替换（只替换第一个）
+        return f"Edited {path}"
+    except Exception as e:
+        return f"Error: {e}"
+
+def run_write(path: str, content: str) -> str:
+    """
+    ★ 写入文件
+    
+    秘书说："老板，我要写一些内容到文件"
+    秘书创建文件（如果不存在），写入内容
+    """
+    try:
+        fp = safe_path(path)  # 检查路径安全
+        fp.parent.mkdir(parents=True, exist_ok=True)  # 创建父目录（如果不存在）
+        fp.write_text(content)  # 写入内容
         return f"Wrote {len(content)} bytes to {path}"
     except Exception as e:
         return f"Error: {e}"
 
 def run_edit(path: str, old_text: str, new_text: str) -> str:
+    """
+    ★ 编辑文件（查找并替换）
+    
+    秘书说："老板，我要把文件里的 A 改成 B"
+    秘书找到 A，替换成 B，保存文件
+    """
     try:
-        fp = safe_path(path)
-        c = fp.read_text()
-        if old_text not in c:
+        fp = safe_path(path)  # 检查路径安全
+        c = fp.read_text()  # 读整个文件
+        if old_text not in c:  # 检查旧文本是否存在
             return f"Error: Text not found in {path}"
-        fp.write_text(c.replace(old_text, new_text, 1))
+        fp.write_text(c.replace(old_text, new_text, 1))  # 替换（只替换第一个）
         return f"Edited {path}"
     except Exception as e:
         return f"Error: {e}"
 
 
+# ============== 齿轮2️⃣：待办管理 (TodoManager) - s03 ========================
+# 秘书的"记忆本"，记录所有要做的事情
+
 # === SECTION: todos (s03) ===
 class TodoManager:
+    """
+    ★ 待办事项管理器 - 秘书的任务清单
+    
+    就像你有一个手账本，记录要做的事情：
+    - [ ] 买菜
+    - [x] 洗碗
+    - [ ] 写代码
+    
+    TodoManager 就是电子版的这个手账本
+    """
     def __init__(self):
+        # 初始化任务列表，起始为空
         self.items = []
 
     def update(self, items: list) -> str:
+        """更新所有任务列表"""
         validated, ip = [], 0
         for i, item in enumerate(items):
             content = str(item.get("content", "")).strip()
@@ -259,6 +620,34 @@ def auto_compact(messages: list) -> list:
     ]
 
 
+# === SECTION: event_bus (s12) ===
+class EventBus:
+    def __init__(self, event_log_path: Path):
+        self.path = event_log_path
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        if not self.path.exists():
+            self.path.write_text("")
+
+    def emit(self, event: str, task: Optional[dict] = None, worktree: Optional[dict] = None, error: Optional[str] = None):
+        payload = {"event": event, "ts": time.time(), "task": task or {}, "worktree": worktree or {}}
+        if error:
+            payload["error"] = error
+        with self.path.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(payload) + "\n")
+
+    def list_recent(self, limit: int = 20) -> str:
+        n = max(1, min(int(limit or 20), 200))
+        lines = self.path.read_text(encoding="utf-8").splitlines()
+        recent = lines[-n:]
+        items = []
+        for line in recent:
+            try:
+                items.append(json.loads(line))
+            except Exception:
+                items.append({"event": "parse_error", "raw": line})
+        return json.dumps(items, indent=2)
+
+
 # === SECTION: file_tasks (s07) ===
 class TaskManager:
     def __init__(self):
@@ -323,6 +712,24 @@ class TaskManager:
         task["status"] = "in_progress"
         self._save(task)
         return f"Claimed task #{tid} for {owner}"
+
+    def bind_worktree(self, task_id: int, worktree: str, owner: str = "") -> str:
+        task = self._load(task_id)
+        task["worktree"] = worktree
+        if owner:
+            task["owner"] = owner
+        if task["status"] == "pending":
+            task["status"] = "in_progress"
+        task["updated_at"] = time.time()
+        self._save(task)
+        return json.dumps(task, indent=2)
+
+    def unbind_worktree(self, task_id: int) -> str:
+        task = self._load(task_id)
+        task["worktree"] = ""
+        task["updated_at"] = time.time()
+        self._save(task)
+        return json.dumps(task, indent=2)
 
 
 # === SECTION: background (s08) ===
@@ -394,6 +801,174 @@ class MessageBus:
 # === SECTION: shutdown + plan tracking (s10) ===
 shutdown_requests = {}
 plan_requests = {}
+
+
+# === SECTION: worktree (s12) ===
+class WorktreeManager:
+    def __init__(self, repo_root: Path, tasks: TaskManager, events: EventBus):
+        self.repo_root = repo_root
+        self.tasks = tasks
+        self.events = events
+        self.dir = repo_root / ".worktrees"
+        self.dir.mkdir(parents=True, exist_ok=True)
+        self.index_path = self.dir / "index.json"
+        if not self.index_path.exists():
+            self.index_path.write_text(json.dumps({"worktrees": []}, indent=2))
+        self.git_available = self._is_git_repo()
+
+    def _is_git_repo(self) -> bool:
+        try:
+            r = subprocess.run(["git", "rev-parse", "--is-inside-work-tree"], cwd=self.repo_root, capture_output=True, text=True, timeout=10)
+            return r.returncode == 0
+        except Exception:
+            return False
+
+    def _run_git(self, args: list[str]) -> str:
+        if not self.git_available:
+            raise RuntimeError("Not in a git repository. worktree tools require git.")
+        r = subprocess.run(["git", *args], cwd=self.repo_root, capture_output=True, text=True, timeout=120)
+        if r.returncode != 0:
+            msg = (r.stdout + r.stderr).strip()
+            raise RuntimeError(msg or f"git {' '.join(args)} failed")
+        return (r.stdout + r.stderr).strip() or "(no output)"
+
+    def _load_index(self) -> dict:
+        return json.loads(self.index_path.read_text())
+
+    def _save_index(self, data: dict):
+        self.index_path.write_text(json.dumps(data, indent=2))
+
+    def _find(self, name: str) -> Optional[dict]:
+        idx = self._load_index()
+        for wt in idx.get("worktrees", []):
+            if wt.get("name") == name:
+                return wt
+        return None
+
+    def _validate_name(self, name: str):
+        if not re.fullmatch(r"[A-Za-z0-9._-]{1,40}", name or ""):
+            raise ValueError("Invalid worktree name. Use 1-40 chars: letters, numbers, ., _, -")
+
+    def create(self, name: str, task_id: int = None, base_ref: str = "HEAD") -> str:
+        self._validate_name(name)
+        if self._find(name):
+            raise ValueError(f"Worktree '{name}' already exists in index")
+        if task_id is not None:
+            try:
+                self.tasks._load(task_id)
+            except:
+                raise ValueError(f"Task {task_id} not found")
+
+        path = self.dir / name
+        branch = f"wt/{name}"
+        self.events.emit("worktree.create.before", task={"id": task_id} if task_id is not None else {}, worktree={"name": name, "base_ref": base_ref})
+        try:
+            self._run_git(["worktree", "add", "-b", branch, str(path), base_ref])
+
+            entry = {"name": name, "path": str(path), "branch": branch, "task_id": task_id, "status": "active", "created_at": time.time()}
+            idx = self._load_index()
+            idx["worktrees"].append(entry)
+            self._save_index(idx)
+
+            if task_id is not None:
+                self.tasks.bind_worktree(task_id, name)
+
+            self.events.emit("worktree.create.after", task={"id": task_id} if task_id is not None else {}, worktree={"name": name, "path": str(path), "branch": branch, "status": "active"})
+            return json.dumps(entry, indent=2)
+        except Exception as e:
+            self.events.emit("worktree.create.failed", task={"id": task_id} if task_id is not None else {}, worktree={"name": name, "base_ref": base_ref}, error=str(e))
+            raise
+
+    def list_all(self) -> str:
+        idx = self._load_index()
+        wts = idx.get("worktrees", [])
+        if not wts:
+            return "No worktrees in index."
+        lines = []
+        for wt in wts:
+            suffix = f" task={wt['task_id']}" if wt.get("task_id") else ""
+            lines.append(f"[{wt.get('status', 'unknown')}] {wt['name']} -> {wt['path']} ({wt.get('branch', '-')}){suffix}")
+        return "\n".join(lines)
+
+    def status(self, name: str) -> str:
+        wt = self._find(name)
+        if not wt:
+            return f"Error: Unknown worktree '{name}'"
+        path = Path(wt["path"])
+        if not path.exists():
+            return f"Error: Worktree path missing: {path}"
+        r = subprocess.run(["git", "status", "--short", "--branch"], cwd=path, capture_output=True, text=True, timeout=60)
+        text = (r.stdout + r.stderr).strip()
+        return text or "Clean worktree"
+
+    def run(self, name: str, command: str) -> str:
+        dangerous = ["rm -rf /", "sudo", "shutdown", "reboot", "> /dev/"]
+        if any(d in command for d in dangerous):
+            return "Error: Dangerous command blocked"
+
+        wt = self._find(name)
+        if not wt:
+            return f"Error: Unknown worktree '{name}'"
+        path = Path(wt["path"])
+        if not path.exists():
+            return f"Error: Worktree path missing: {path}"
+
+        try:
+            r = subprocess.run(command, shell=True, cwd=path, capture_output=True, text=True, timeout=300)
+            out = (r.stdout + r.stderr).strip()
+            return out[:50000] if out else "(no output)"
+        except subprocess.TimeoutExpired:
+            return "Error: Timeout (300s)"
+
+    def remove(self, name: str, force: bool = False, complete_task: bool = False) -> str:
+        wt = self._find(name)
+        if not wt:
+            return f"Error: Unknown worktree '{name}'"
+
+        self.events.emit("worktree.remove.before", task={"id": wt.get("task_id")} if wt.get("task_id") is not None else {}, worktree={"name": name, "path": wt.get("path")})
+        try:
+            args = ["worktree", "remove"]
+            if force:
+                args.append("--force")
+            args.append(wt["path"])
+            self._run_git(args)
+
+            if complete_task and wt.get("task_id") is not None:
+                task_id = wt["task_id"]
+                before = json.loads(self.tasks.get(task_id))
+                self.tasks.update(task_id, status="completed")
+                self.tasks.unbind_worktree(task_id)
+                self.events.emit("task.completed", task={"id": task_id, "subject": before.get("subject", ""), "status": "completed"}, worktree={"name": name})
+
+            idx = self._load_index()
+            for item in idx.get("worktrees", []):
+                if item.get("name") == name:
+                    item["status"] = "removed"
+                    item["removed_at"] = time.time()
+            self._save_index(idx)
+
+            self.events.emit("worktree.remove.after", task={"id": wt.get("task_id")} if wt.get("task_id") is not None else {}, worktree={"name": name, "path": wt.get("path"), "status": "removed"})
+            return f"Removed worktree '{name}'"
+        except Exception as e:
+            self.events.emit("worktree.remove.failed", task={"id": wt.get("task_id")} if wt.get("task_id") is not None else {}, worktree={"name": name, "path": wt.get("path")}, error=str(e))
+            raise
+
+    def keep(self, name: str) -> str:
+        wt = self._find(name)
+        if not wt:
+            return f"Error: Unknown worktree '{name}'"
+
+        idx = self._load_index()
+        kept = None
+        for item in idx.get("worktrees", []):
+            if item.get("name") == name:
+                item["status"] = "kept"
+                item["kept_at"] = time.time()
+                kept = item
+        self._save_index(idx)
+
+        self.events.emit("worktree.keep", task={"id": wt.get("task_id")} if wt.get("task_id") is not None else {}, worktree={"name": name, "path": wt.get("path"), "status": "kept"})
+        return json.dumps(kept, indent=2) if kept else f"Error: Unknown worktree '{name}'"
 
 
 # === SECTION: team (s09/s11) ===
@@ -549,11 +1124,14 @@ TASK_MGR = TaskManager()
 BG = BackgroundManager()
 BUS = MessageBus()
 TEAM = TeammateManager(BUS, TASK_MGR)
+EVENTS = EventBus(REPO_ROOT / ".worktrees" / "events.jsonl")
+WORKTREES = WorktreeManager(REPO_ROOT, TASK_MGR, EVENTS)
 
 # === SECTION: system_prompt ===
 SYSTEM = f"""You are a coding agent at {WORKDIR}. Use tools to solve tasks.
 Prefer task_create/task_update/task_list for multi-step work. Use TodoWrite for short checklists.
 Use task for subagent delegation. Use load_skill for specialized knowledge.
+Use task + worktree tools for multi-task work. For parallel or risky changes: create tasks, allocate worktree lanes, run commands in those lanes, then choose keep/remove for closeout.
 Skills: {SKILLS.descriptions()}"""
 
 
@@ -599,6 +1177,14 @@ TOOL_HANDLERS = {
     "plan_approval":    lambda **kw: handle_plan_review(kw["request_id"], kw["approve"], kw.get("feedback", "")),
     "idle":             lambda **kw: "Lead does not idle.",
     "claim_task":       lambda **kw: TASK_MGR.claim(kw["task_id"], "lead"),
+    "task_bind_worktree": lambda **kw: TASK_MGR.bind_worktree(kw["task_id"], kw["worktree"], kw.get("owner", "")),
+    "worktree_create":  lambda **kw: WORKTREES.create(kw["name"], kw.get("task_id"), kw.get("base_ref", "HEAD")),
+    "worktree_list":    lambda **kw: WORKTREES.list_all(),
+    "worktree_status":  lambda **kw: WORKTREES.status(kw["name"]),
+    "worktree_run":     lambda **kw: WORKTREES.run(kw["name"], kw["command"]),
+    "worktree_keep":    lambda **kw: WORKTREES.keep(kw["name"]),
+    "worktree_remove":  lambda **kw: WORKTREES.remove(kw["name"], kw.get("force", False), kw.get("complete_task", False)),
+    "worktree_events":  lambda **kw: EVENTS.list_recent(kw.get("limit", 20)),
 }
 
 TOOLS = [
@@ -648,70 +1234,198 @@ TOOLS = [
      "input_schema": {"type": "object", "properties": {}}},
     {"name": "claim_task", "description": "Claim a task from the board.",
      "input_schema": {"type": "object", "properties": {"task_id": {"type": "integer"}}, "required": ["task_id"]}},
+    {"name": "task_bind_worktree", "description": "Bind a task to a worktree name.",
+     "input_schema": {"type": "object", "properties": {"task_id": {"type": "integer"}, "worktree": {"type": "string"}, "owner": {"type": "string"}}, "required": ["task_id", "worktree"]}},
+    {"name": "worktree_create", "description": "Create a git worktree and optionally bind it to a task.",
+     "input_schema": {"type": "object", "properties": {"name": {"type": "string"}, "task_id": {"type": "integer"}, "base_ref": {"type": "string"}}, "required": ["name"]}},
+    {"name": "worktree_list", "description": "List worktrees tracked in .worktrees/index.json.",
+     "input_schema": {"type": "object", "properties": {}}},
+    {"name": "worktree_status", "description": "Show git status for one worktree.",
+     "input_schema": {"type": "object", "properties": {"name": {"type": "string"}}, "required": ["name"]}},
+    {"name": "worktree_run", "description": "Run a shell command in a named worktree directory.",
+     "input_schema": {"type": "object", "properties": {"name": {"type": "string"}, "command": {"type": "string"}}, "required": ["name", "command"]}},
+    {"name": "worktree_keep", "description": "Mark a worktree as kept in lifecycle state without removing it.",
+     "input_schema": {"type": "object", "properties": {"name": {"type": "string"}}, "required": ["name"]}},
+    {"name": "worktree_remove", "description": "Remove a worktree and optionally mark its bound task completed.",
+     "input_schema": {"type": "object", "properties": {"name": {"type": "string"}, "force": {"type": "boolean"}, "complete_task": {"type": "boolean"}}, "required": ["name"]}},
+    {"name": "worktree_events", "description": "List recent worktree/task lifecycle events from .worktrees/events.jsonl.",
+     "input_schema": {"type": "object", "properties": {"limit": {"type": "integer"}}}},
 ]
 
 
+# ============ 🫀 最终大脑：整合所有11个齿轮 ============
 # === SECTION: agent_loop ===
+
 def agent_loop(messages: list):
-    rounds_without_todo = 0
+    """
+    ★★★ 这是整个系统的【心脏】 ★★★
+    
+    这个函数在**无限循环**中做同一件事：
+    1. 清理消息（压缩）
+    2. 检查后台任务完成没
+    3. 检查有没有新消息
+    4. 让 AI 思考并做决定
+    5. AI 使用一些工具
+    6. 重复...
+    
+    类比：一个人在工作
+    ┌─────────────────────────────────────────┐
+    │ 1. 整理桌子（可能有太多纸张了）        │
+    │ 2. 检查邮箱（有没有新邮件）            │
+    │ 3. 检查留言板（有没有新消息）          │
+    │ 4. 看看当前的任务，思考下一步          │
+    │ 5. 执行任务（用手做点什么）            │
+    │ 6. 回到第一步（永远不停）              │
+    └─────────────────────────────────────────┘
+    
+    在 LLM 开发中，这个循环被称为："agentic loop" 或 "thinking loop"
+    """
+    rounds_without_todo = 0  # 计数器：多少轮没有使用待办功能了
+    
     while True:
-        # s06: compression pipeline
-        microcompact(messages)
-        if estimate_tokens(messages) > TOKEN_THRESHOLD:
-            print("[auto-compact triggered]")
-            messages[:] = auto_compact(messages)
-        # s08: drain background notifications
-        notifs = BG.drain()
-        if notifs:
-            txt = "\n".join(f"[bg:{n['task_id']}] {n['status']}: {n['result']}" for n in notifs)
-            messages.append({"role": "user", "content": f"<background-results>\n{txt}\n</background-results>"})
+        # 无限循环，直到 AI 说"我完成了"
+        
+        # ============ 步骤1️⃣：消息压缩（齿轮5️⃣）============
+        # AI 的脑子有容量限制（100000 tokens）
+        # 当对话太长时，需要压缩旧消息
+        microcompact(messages)  # 快速检查消息的大小
+        
+        if estimate_tokens(messages) > TOKEN_THRESHOLD:  # 如果超过限制
+            print("[auto-compact triggered]")  # 触发自动压缩
+            messages[:] = auto_compact(messages)  # 把旧消息进行总结压缩
+        
+        # ============ 步骤2️⃣：检查后台任务（齿轮7️⃣）============
+        # 如果有后台线程完成了工作，检查结果
+        notifs = BG.drain()  # 从"信箱"里取出所有完成的任务通知
+        
+        if notifs:  # 如果有任务完成了
+            # 把所有完成的结果格式化成文本
+            txt = "\n".join(f"[bg:{n['task_id']}] {n['status']}: {n['result']}" 
+                           for n in notifs)
+            # 把结果注入到消息历史中，让 AI 看到
+            messages.append({"role": "user", 
+                           "content": f"<background-results>\n{txt}\n</background-results>"})
+            # AI"确认"收到了这些消息
             messages.append({"role": "assistant", "content": "Noted background results."})
-        # s10: check lead inbox
-        inbox = BUS.read_inbox("lead")
-        if inbox:
-            messages.append({"role": "user", "content": f"<inbox>{json.dumps(inbox, indent=2)}</inbox>"})
+        
+        # ============ 步骤3️⃣：检查新消息（齿轮8️⃣）============
+        # 如果有其他秘书给主秘书留了消息，检查收件箱
+        inbox = BUS.read_inbox("lead")  # 读取"lead"收件箱中的所有消息
+        
+        if inbox:  # 如果有新消息
+            # 把消息注入到 AI 的视野
+            messages.append({"role": "user", 
+                           "content": f"<inbox>{json.dumps(inbox, indent=2)}</inbox>"})
+            # AI"确认"收到了消息
             messages.append({"role": "assistant", "content": "Noted inbox messages."})
-        # LLM call
+        
+        # ============ 步骤4️⃣：AI 做决定（齿轮11️⃣的核心）============
+        # 现在让 Claude AI 看一下消息历史，思考下一步
         response = client.messages.create(
-            model=MODEL, system=SYSTEM, messages=messages,
-            tools=TOOLS, max_tokens=8000,
+            model=MODEL,              # 使用 Claude 模型
+            system=SYSTEM,            # 告诉 AI 它的角色
+            messages=messages,        # 整个对话历史
+            tools=TOOLS,              # AI 可以使用哪些工具
+            max_tokens=8000,          # 最多生成 8000 个 token
         )
+        
+        # 把 AI 的回应添加到消息历史（这样下一轮 AI 能看到自己之前做了什么）
         messages.append({"role": "assistant", "content": response.content})
+        
+        # 检查 AI 为什么停止了回复
+        # "tool_use" = AI 想使用工具
+        # "end_turn" 或其他 = AI 完成了对话
         if response.stop_reason != "tool_use":
+            # 如果 AI 不是想要使用工具，说明任务完成，可以退出循环
             return
-        # Tool execution
-        results = []
-        used_todo = False
-        manual_compress = False
+        
+        # ============ 步骤5️⃣：执行 AI 请求的工具（齿轮2️⃣）============
+        # AI 说："我要用 bash 工具运行一个命令"
+        # 我们现在来执行这个请求
+        
+        results = []  # 存储所有工具的执行结果
+        used_todo = False  # 追踪是否使用了待办功能
+        manual_compress = False  # 追踪是否手动压缩了消息
+        
         for block in response.content:
-            if block.type == "tool_use":
-                if block.name == "compress":
+            # response.content 包含多个"块"（可能有文本、工具调用等）
+            
+            if block.type == "tool_use":  # 这是一个工具调用请求
+                
+                if block.name == "compress":  # 标记手动压缩
                     manual_compress = True
+                
+                # 从工具处理器字典中找到对应的函数
                 handler = TOOL_HANDLERS.get(block.name)
+                
                 try:
-                    output = handler(**block.input) if handler else f"Unknown tool: {block.name}"
+                    # 执行工具（block.input 包含工具的参数）
+                    output = (handler(**block.input) 
+                             if handler 
+                             else f"Unknown tool: {block.name}")
                 except Exception as e:
+                    # 如果工具执行出错
                     output = f"Error: {e}"
+                
+                # 打印工具执行的结果（用于调试）
                 print(f"> {block.name}: {str(output)[:200]}")
-                results.append({"type": "tool_result", "tool_use_id": block.id, "content": str(output)})
-                if block.name == "TodoWrite":
+                
+                # 记录工具的执行结果
+                results.append({
+                    "type": "tool_result",
+                    "tool_use_id": block.id,      # AI 用这个ID来引用结果
+                    "content": str(output)        # 工具的执行结果
+                })
+                
+                if block.name == "TodoWrite":  # 标记使用了待办功能
                     used_todo = True
-        # s03: nag reminder (only when todo workflow is active)
+        
+        # ============ 齿轮3️⃣：待办提醒（s03）============
+        # 如果 AI 有打开的待办事项，但很多轮都没有管它们
+        # 就在消息中"碎碎念"提醒 AI
         rounds_without_todo = 0 if used_todo else rounds_without_todo + 1
+        
         if TODO.has_open_items() and rounds_without_todo >= 3:
+            # 提醒 AI："嘿，你还有待办事项没处理呢！"
             results.insert(0, {"type": "text", "text": "<reminder>Update your todos.</reminder>"})
+        
+        # 把所有工具执行的结果返回给 AI
         messages.append({"role": "user", "content": results})
-        # s06: manual compress
+        
+        # ============ 额外功能：手动压缩（齿轮5️⃣）============
+        # 如果 AI 主动要求压缩消息，就执行压缩
         if manual_compress:
             print("[manual compact]")
             messages[:] = auto_compact(messages)
+        
+        # 循环回到最开始（无限循环）
 
 
+# ============ REPL（用户交互界面）============
 # === SECTION: repl ===
 if __name__ == "__main__":
-    history = []
+    """
+    ★ REPL = Read-Eval-Print Loop（读取-求值-打印循环）
+    
+    这是一个"会话模式"，让你和 AI 对话
+    
+    流程：
+    1. 读取你的输入
+    2. 让 AI 处理
+    3. 打印 AI 的输出
+    4. 重复...
+    
+    特殊命令：
+    /compact     → 手动压缩消息历史
+    /tasks       → 列出所有任务
+    /team        → 列出所有秘书  
+    /inbox       → 检查收件箱
+    """
+    history = []  # 对话历史
+    
     while True:
         try:
+            # 等待用户输入（提示符是 "s_full >> " 的青色版本）
             query = input("\033[36ms_full >> \033[0m")
         except (EOFError, KeyboardInterrupt):
             break
@@ -733,4 +1447,9 @@ if __name__ == "__main__":
             continue
         history.append({"role": "user", "content": query})
         agent_loop(history)
+        response_content = history[-1]["content"]
+        if isinstance(response_content, list):
+            for block in response_content:
+                if hasattr(block, "text"):
+                    print(block.text)
         print()
